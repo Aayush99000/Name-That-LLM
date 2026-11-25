@@ -1,0 +1,33 @@
+# Competition data (Kaggle rules: don't redistribute)
+data/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Run outputs
+logs/
+outputs/
+checkpoints/
+wandb/
+hf_cache/
+submission.parquet
+submission.csv
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+*.joblib
+*.pkl
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,24 @@
+# torch is installed separately in setup_env.sh from the cu126 index
+# (covers V100/T4/A100/H200 on Explorer).
+
+# Modeling
+transformers
+accelerate
+datasets
+peft
+sentencepiece
+tiktoken
+protobuf
+
+# Classical ML / data
+scikit-learn
+scipy
+numpy
+pandas
+pyarrow
+lightgbm
+
+# Utilities
+tqdm
+matplotlib
+ipykernel

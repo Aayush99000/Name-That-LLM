@@ -190,7 +190,8 @@ def train_fold(args, fold, tr_df, va_df, te_df, tok, collate, n_classes, device,
     # Fixed epoch count (no best-epoch picking) keeps the OOF score honest.
     te_probs = predict(model, te_dl, device, amp_dtype)
     if args.save_models:
-        model.save_pretrained(out_dir / f"fold{fold}")
+        # fp16 halves the upload size for Kaggle; inference runs under autocast anyway.
+        model.to(torch.float16).save_pretrained(out_dir / f"fold{fold}")
         tok.save_pretrained(out_dir / f"fold{fold}")
     del model, opt
     torch.cuda.empty_cache()

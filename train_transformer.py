@@ -54,6 +54,8 @@ def parse_args():
     ap.add_argument("--lora", action="store_true", help="LoRA adapters (for decoder LLMs)")
     ap.add_argument("--lora_r", type=int, default=16)
     ap.add_argument("--grad_ckpt", action="store_true")
+    ap.add_argument("--precision", choices=["auto", "bf16", "fp16", "fp32"], default="auto",
+                    help="autocast dtype; auto = bf16 if supported else fp16")
     ap.add_argument("--save_models", action="store_true")
     ap.add_argument("--run_name", default=None)
     ap.add_argument("--out_root", default=str(DEFAULT_OUT))
@@ -85,7 +87,11 @@ class TextDS(Dataset):
 
 
 def load_model(args, n_classes, tok):
-    model = AutoModelForSequenceClassification.from_pretrained(args.model, num_labels=n_classes)
+    # transformers v5 loads in the checkpoint's dtype by default; DeBERTa-v3
+    # ships fp16 weights, and AdamW on fp16 params goes NaN after one step.
+    # Keep fp32 master weights and let autocast handle bf16/fp16 compute.
+    model = AutoModelForSequenceClassification.from_pretrained(
+        args.model, num_labels=n_classes, dtype=torch.float32)
     if model.config.pad_token_id is None:
         model.config.pad_token_id = tok.pad_token_id
     if args.grad_ckpt:
@@ -160,6 +166,10 @@ def train_fold(args, fold, tr_df, va_df, te_df, tok, collate, n_classes, device,
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
                 logits = model(**batch).logits
             loss = loss_fn(logits.float(), labels) / args.grad_accum
+            if not torch.isfinite(loss):
+                raise FloatingPointError(
+                    f"non-finite loss at fold {fold} epoch {epoch + 1} step {step} "
+                    f"(precision {args.precision}, amp {amp_dtype}); try --precision fp32")
             scaler.scale(loss).backward()
             if (step + 1) % args.grad_accum == 0:
                 scaler.unscale_(opt)
@@ -193,10 +203,13 @@ def main():
         args.epochs, args.max_len, args.only_fold = 1, 128, 0
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda":
-        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    else:
+    if device.type != "cuda" or args.precision == "fp32":
         amp_dtype = None
+    elif args.precision == "auto":
+        # is_bf16_supported() is True on V100 via slow emulation; require native bf16 (sm80+).
+        amp_dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    else:
+        amp_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}[args.precision]
     print(f"device {device} ({torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu'}), amp {amp_dtype}")
 
     train = pd.read_csv(DATA_DIR / "train.csv")
@@ -215,7 +228,8 @@ def main():
         tok.pad_token = tok.eos_token
     collate = DataCollatorWithPadding(tok, pad_to_multiple_of=8)
 
-    oof = np.full((len(train), len(classes)), np.nan)
+    oof = np.zeros((len(train), len(classes)))
+    filled = np.zeros(len(train), dtype=bool)
     te_probs, histories = [], {}
     folds = list(GroupKFold(n_splits=args.folds).split(train, train.label, train.prompt_id))
     for fold, (tr_idx, va_idx) in enumerate(folds):
@@ -228,11 +242,13 @@ def main():
         va_p, te_p, hist = train_fold(args, fold, tr_df, va_df, test, tok, collate,
                                       len(classes), device, amp_dtype, out_dir)
         oof[va_idx] = va_p
+        filled[va_idx] = True
         te_probs.append(te_p)
         histories[fold] = hist
         np.save(out_dir / "oof.npy", oof)  # checkpoint after every fold
+        np.save(out_dir / "oof_filled.npy", filled)
 
-    done = ~np.isnan(oof[:, 0])
+    done = filled
     y = train.label.to_numpy()[done]
     pred = oof[done].argmax(1)
     metrics = {

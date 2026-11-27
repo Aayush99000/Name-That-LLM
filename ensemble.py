@@ -43,11 +43,29 @@ def tfidf_component(train, test, kind="char+word", model_name="logreg"):
     return oof, m.predict_proba(Xte)
 
 
+def load_tokenizer(path):
+    """AutoTokenizer, falling back to the raw tokenizer.json for older transformers
+    versions that can't read a tokenizer_config.json written by transformers v5."""
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+    try:
+        tok = AutoTokenizer.from_pretrained(path)
+    except Exception as e:  # noqa: BLE001 - any load failure gets the fallback
+        print(f"  AutoTokenizer failed ({type(e).__name__}: {e}); loading tokenizer.json directly")
+        cfg = json.loads((Path(path) / "tokenizer_config.json").read_text())
+        special = {k: cfg[k] for k in ("bos_token", "eos_token", "unk_token", "sep_token",
+                                       "pad_token", "cls_token", "mask_token")
+                   if isinstance(cfg.get(k), str)}
+        tok = PreTrainedTokenizerFast(tokenizer_file=str(Path(path) / "tokenizer.json"), **special)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    return tok
+
+
 def predict_with_fold_models(run_dir, texts, max_len):
     """Average softmax over saved fold models; imports torch only when needed."""
     import torch
     from torch.utils.data import DataLoader
-    from transformers import AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding
+    from transformers import AutoModelForSequenceClassification, DataCollatorWithPadding
 
     from train_transformer import TextDS, predict
 
@@ -57,9 +75,7 @@ def predict_with_fold_models(run_dir, texts, max_len):
         amp = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     probs = []
     for fold_dir in sorted(Path(run_dir).glob("fold*")):
-        tok = AutoTokenizer.from_pretrained(fold_dir)
-        if tok.pad_token is None:
-            tok.pad_token = tok.eos_token
+        tok = load_tokenizer(fold_dir)
         # Fold weights are saved in fp16; CPU needs fp32 to run them.
         dtype = torch.float32 if device.type == "cpu" else "auto"
         model = AutoModelForSequenceClassification.from_pretrained(fold_dir, dtype=dtype).to(device)
@@ -138,6 +154,8 @@ def main():
     ap.add_argument("--weights", nargs="*", type=float, help="fixed weights (tfidf first, then runs)")
     ap.add_argument("--step", type=float, default=0.05, help="weight grid step")
     ap.add_argument("--out", default="submission.parquet")
+    ap.add_argument("--save_blend", help="write the chosen components and weights to this JSON "
+                                         "(read by the Kaggle notebook as blend.json)")
     args = ap.parse_args()
 
     train = pd.read_csv(B.DATA_DIR / "train.csv")
@@ -166,6 +184,11 @@ def main():
     print("\nweights: " + ", ".join(f"{n}={x:.2f}" for n, x in zip(names, w)))
     print(f"blended OOF balanced accuracy {score:.4f}"
           + ("" if args.weights else "  (weights tuned on OOF: slightly optimistic)"))
+    if args.save_blend:
+        Path(args.save_blend).write_text(json.dumps(
+            {"runs": names, "weights": [round(float(x), 4) for x in w], "oof_bal_acc": round(score, 4)},
+            indent=2))
+        print(f"wrote {args.save_blend}")
 
     pred = classes[blend(tests, w).argmax(1)]
     sub = pd.DataFrame({"id": test.id, "model": pred})

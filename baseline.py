@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import time
 from pathlib import Path
@@ -25,7 +26,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
 
 KAGGLE_DIR = Path("/kaggle/input/competitions/name-that-llm")
-DATA_DIR = KAGGLE_DIR if KAGGLE_DIR.exists() else Path(__file__).resolve().parent / "data"
+DATA_DIR = (Path(os.environ["NTL_DATA_DIR"]) if os.environ.get("NTL_DATA_DIR")
+            else KAGGLE_DIR if KAGGLE_DIR.exists() else Path(__file__).resolve().parent / "data")
 OUT_DIR = Path(__file__).resolve().parent / "outputs"
 
 

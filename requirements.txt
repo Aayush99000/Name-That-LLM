@@ -22,3 +22,5 @@ lightgbm
 tqdm
 matplotlib
 ipykernel
+kaggle
+six  # kaggle CLI 2.x imports it without declaring it
